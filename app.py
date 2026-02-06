@@ -69,8 +69,8 @@ if APP_PASSWORD:
 
     if not st.session_state.authed:
         st.subheader("🔒 请输入访问密码")
-        pwd = st.text_input("Password", type="password")
-        if st.button("进入"):
+        pwd = st.text_input("Password", type="password", key="pwd_input")
+        if st.button("进入", key="pwd_enter_btn"):
             if pwd == APP_PASSWORD:
                 st.session_state.authed = True
                 st.rerun()
@@ -150,8 +150,8 @@ def load_kb_documents(agent_id: str) -> List[Document]:
 
 def build_embeddings_or_none():
     """
-    ✅ 只用 text-embedding-004（不再碰 embedding-001）
-    如果账号/地区不支持，则返回 None
+    ✅ 只用 text-embedding-004
+    不可用则返回 None（上层自动关闭 RAG）
     """
     try:
         emb = GoogleGenerativeAIEmbeddings(
@@ -171,20 +171,17 @@ def get_vectorstore(agent_id: str):
     """
     embeddings = build_embeddings_or_none()
     if embeddings is None:
-        # 让上层决定是否启用 RAG
         raise RuntimeError("Embedding 不可用：text-embedding-004 无法调用（权限/地区/Key 可能不支持）。")
 
     persist_dir = DB_DIR / agent_id
     persist_dir.mkdir(parents=True, exist_ok=True)
 
-    # ✅ collection_name 加 v2：避免你之前用旧 embedding 建过库导致混乱
     vs = Chroma(
         collection_name=f"kb_{agent_id}_v2",
         embedding_function=embeddings,
         persist_directory=str(persist_dir),
     )
 
-    # 如果空库：写入 kb
     try:
         existing = vs._collection.count()
     except Exception:
@@ -244,7 +241,7 @@ def extract_text(resp) -> str:
 
 
 # =========================
-# Sidebar UI
+# Sidebar UI（✅ 修复：不重复控件 + 全部加 key）
 # =========================
 with st.sidebar:
     st.header("设置")
@@ -252,12 +249,10 @@ with st.sidebar:
     st.write("Gemini Key exists:", True)
     st.write("Default model:", GEMINI_MODEL_DEFAULT)
 
-    # ===== Embedding 诊断（临时）=====
-    from langchain_google_genai import GoogleGenerativeAIEmbeddings
-
     st.divider()
-    st.caption("🔍 Embedding 可用性自检")
+    st.caption("🔍 Embedding 可用性自检（text-embedding-004）")
 
+    emb_ok = False
     try:
         emb = GoogleGenerativeAIEmbeddings(
             model="text-embedding-004",
@@ -265,12 +260,19 @@ with st.sidebar:
         )
         vec = emb.embed_query("ping")
         st.success(f"Embedding OK ✅ 维度 = {len(vec)}")
+        emb_ok = True
     except Exception as e:
         st.error(f"Embedding FAILED ❌ {type(e).__name__}")
         st.code(str(e))
-    agent_name = st.selectbox("选择 Agent", list(AGENTS.keys()))
+        emb_ok = False
 
-    agent_name = st.selectbox("选择 Agent", list(AGENTS.keys()))
+    st.divider()
+
+    agent_name = st.selectbox(
+        "选择 Agent",
+        list(AGENTS.keys()),
+        key="sb_agent_name",
+    )
 
     model_candidates = [
         "gemini-3-pro-preview",
@@ -284,21 +286,32 @@ with st.sidebar:
         "模型",
         model_candidates,
         index=model_candidates.index(default_model),
+        key="sb_model_name",
     )
 
-    temperature = st.slider("temperature", 0.0, 1.0, 0.3, 0.05)
+    temperature = st.slider(
+        "temperature",
+        0.0, 1.0, 0.3, 0.05,
+        key="sb_temperature",
+    )
 
-    use_rag = st.toggle("启用 RAG（从 kb 检索）", value=True)
-    topk = st.slider("检索 TopK", 1, 8, 4, 1)
+    use_rag = st.toggle(
+        "启用 RAG（从 kb 检索）",
+        value=True,
+        key="sb_use_rag",
+    )
+    topk = st.slider(
+        "检索 TopK",
+        1, 8, 4, 1,
+        key="sb_topk",
+    )
 
-    # ✅ 如果 embedding 不可用，自动关闭 RAG，避免每次对话都 warning
-    if use_rag:
-        emb_check = build_embeddings_or_none()
-        if emb_check is None:
-            st.warning("当前账号暂不可用 Embedding（text-embedding-004 调用失败），RAG 已自动关闭。")
-            use_rag = False
+    # Embedding 不可用：自动禁用 RAG
+    if use_rag and (not emb_ok):
+        st.warning("当前账号暂不可用 Embedding（text-embedding-004 调用失败），已自动关闭 RAG。")
+        use_rag = False
 
-    if st.button("清空当前 Agent 对话"):
+    if st.button("清空当前 Agent 对话", key="sb_clear_chat"):
         st.session_state.pop(f"chat::{agent_name}", None)
         st.rerun()
 
@@ -337,22 +350,22 @@ for msg in chat:
 user_text = st.chat_input(f"正在使用：{agent_name}（可粘贴长文本）")
 
 if user_text:
-    # 1️⃣ 记录用户消息
+    # 1) 记录用户消息
     chat.append(HumanMessage(content=user_text))
     with st.chat_message("user"):
         st.markdown(user_text)
 
-    # 2️⃣ RAG（可选）
+    # 2) RAG（可选）
     rag_context = ""
     if use_rag:
         try:
             rag_context = retrieve_context(agent_id, user_text, k=topk)
         except Exception as e:
-            # 这里不再刷屏，只提示一次
+            # 不刷屏：只在当前轮提示一次
             st.warning(f"RAG 暂不可用，已自动跳过。原因：{e}")
             rag_context = ""
 
-    # 3️⃣ system prompt 拼装
+    # 3) system prompt 拼装
     sys = system_prompt
     if rag_context:
         sys = (
@@ -364,14 +377,14 @@ if user_text:
 
     messages = [SystemMessage(content=sys)] + chat
 
-    # 4️⃣ 调用 LLM + 显示回复
+    # 4) 调用 LLM + 显示回复
     with st.chat_message("assistant"):
         with st.spinner("思考中…"):
             resp = llm.invoke(messages)
             answer = extract_text(resp)
             st.markdown(answer)
 
-    # 5️⃣ 记录 assistant 消息
+    # 5) 记录 assistant 消息
     chat.append(AIMessage(content=answer))
 
 
