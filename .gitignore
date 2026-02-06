@@ -1,5 +1,24 @@
-.venv/
-.chroma_db/
-.streamlit/secrets.toml
-.env
+# ===== Python =====
 __pycache__/
+*.pyc
+*.pyo
+*.pyd
+
+# ===== Virtual Env =====
+.venv/
+venv/
+env/
+
+# ===== Env & Secrets =====
+.env
+
+# ===== Vector DB / Cache =====
+.chroma_db/
+
+# ===== OS =====
+.DS_Store
+Thumbs.db
+
+# ===== IDE =====
+.vscode/
+.idea/
