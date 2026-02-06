@@ -145,14 +145,23 @@ def load_kb_documents(agent_id: str) -> list[Document]:
 
 
 def build_embeddings() -> GoogleGenerativeAIEmbeddings:
-    # Google 官方 embeddings：常见可用名
-    # - "models/embedding-001"
-    # 某些文档/示例会写 "gemini-embedding-001"（不同 SDK/时期命名可能变化）
-    # 这里用更常见的 models/embedding-001
-    return GoogleGenerativeAIEmbeddings(
-        model="models/embedding-001",
-        google_api_key=GOOGLE_API_KEY,
-    )
+    # 兜底顺序：优先 text-embedding-004，其次 embedding-001
+    candidates = ["text-embedding-004", "models/embedding-001"]
+    last_err = None
+
+    for m in candidates:
+        try:
+            emb = GoogleGenerativeAIEmbeddings(
+                model=m,
+                google_api_key=GOOGLE_API_KEY,
+            )
+            # 触发一次小请求做校验
+            _ = emb.embed_query("ping")
+            return emb
+        except Exception as e:
+            last_err = e
+
+    raise RuntimeError(f"没有可用的 embedding 模型，请检查账号权限/地区/版本。最后错误：{last_err}")
 
 
 @st.cache_resource(show_spinner=False)
