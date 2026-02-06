@@ -27,7 +27,7 @@ from docx import Document as DocxDocument
 # Streamlit 基础设置
 # =========================
 st.set_page_config(page_title="AI Workbench · Gemini", layout="wide")
-st.title("🧰 AI Workbench · 13 Agents + RAG（Gemini）")
+st.title("🧰 AI Workbench · 13 Agents + RAG（Gemini 3 Pro）")
 
 
 # =========================
@@ -52,7 +52,7 @@ def sget(key: str, default: Optional[str] = None) -> Optional[str]:
 
 
 GOOGLE_API_KEY = sget("GOOGLE_API_KEY")
-GEMINI_MODEL_DEFAULT = sget("GEMINI_MODEL", "gemini-1.5-pro")  # 你可改成 gemini-3-pro-preview
+GEMINI_MODEL_DEFAULT = sget("GEMINI_MODEL", "gemini-3-pro-preview")
 APP_PASSWORD = sget("APP_PASSWORD", "")
 
 if not GOOGLE_API_KEY:
@@ -89,7 +89,6 @@ DB_DIR = Path(".chroma_db")
 PROMPTS_DIR.mkdir(parents=True, exist_ok=True)
 KB_DIR.mkdir(parents=True, exist_ok=True)
 DB_DIR.mkdir(parents=True, exist_ok=True)
-
 
 AGENTS = {
     "01 人设定位 Agent": "agent_01.txt",
@@ -149,42 +148,38 @@ def load_kb_documents(agent_id: str) -> List[Document]:
     return docs
 
 
-def build_embeddings():
+def build_embeddings_or_none():
     """
-    这里用 GoogleGenerativeAIEmbeddings
-    模型名在不同账号/地区可能可用性不同，所以做一个“多候选兜底”。
+    ✅ 只用 text-embedding-004（不再碰 embedding-001）
+    如果账号/地区不支持，则返回 None
     """
-    candidates = [
-        "models/text-embedding-004",
-        "text-embedding-004",
-        "models/embedding-001",
-        "embedding-001",
-    ]
-
-    last_err = None
-    for m in candidates:
-        try:
-            emb = GoogleGenerativeAIEmbeddings(model=m, google_api_key=GOOGLE_API_KEY)
-            _ = emb.embed_query("ping")
-            return emb
-        except Exception as e:
-            last_err = e
-
-    raise RuntimeError(f"没有可用的 embedding 模型，请检查账号权限/地区/版本。最后错误：{last_err}")
+    try:
+        emb = GoogleGenerativeAIEmbeddings(
+            model="text-embedding-004",
+            google_api_key=GOOGLE_API_KEY,
+        )
+        _ = emb.embed_query("ping")
+        return emb
+    except Exception:
+        return None
 
 
 @st.cache_resource(show_spinner=False)
 def get_vectorstore(agent_id: str):
     """
-    每个 agent 一个 Chroma collection
+    每个 agent 一个 Chroma collection（带版本号避免缓存/旧库影响）
     """
-    embeddings = build_embeddings()
+    embeddings = build_embeddings_or_none()
+    if embeddings is None:
+        # 让上层决定是否启用 RAG
+        raise RuntimeError("Embedding 不可用：text-embedding-004 无法调用（权限/地区/Key 可能不支持）。")
 
     persist_dir = DB_DIR / agent_id
     persist_dir.mkdir(parents=True, exist_ok=True)
 
+    # ✅ collection_name 加 v2：避免你之前用旧 embedding 建过库导致混乱
     vs = Chroma(
-        collection_name=f"kb_{agent_id}",
+        collection_name=f"kb_{agent_id}_v2",
         embedding_function=embeddings,
         persist_directory=str(persist_dir),
     )
@@ -232,23 +227,19 @@ def build_llm(model_name: str, temperature: float):
 
 def extract_text(resp) -> str:
     """
-    解决你看到的“乱码”问题：
-    Gemini/LangChain 有时返回 resp.content 是 list[dict]（结构化块）
+    解决“乱码”：Gemini/LangChain 有时返回 resp.content 是 list[dict]
     """
     content = getattr(resp, "content", resp)
     if isinstance(content, str):
         return content
-
     if isinstance(content, list):
         out = []
         for block in content:
             if isinstance(block, dict):
-                # 常见 key：text
                 out.append(str(block.get("text", "")))
             else:
                 out.append(str(block))
         return "".join(out)
-
     return str(content)
 
 
@@ -281,6 +272,13 @@ with st.sidebar:
 
     use_rag = st.toggle("启用 RAG（从 kb 检索）", value=True)
     topk = st.slider("检索 TopK", 1, 8, 4, 1)
+
+    # ✅ 如果 embedding 不可用，自动关闭 RAG，避免每次对话都 warning
+    if use_rag:
+        emb_check = build_embeddings_or_none()
+        if emb_check is None:
+            st.warning("当前账号暂不可用 Embedding（text-embedding-004 调用失败），RAG 已自动关闭。")
+            use_rag = False
 
     if st.button("清空当前 Agent 对话"):
         st.session_state.pop(f"chat::{agent_name}", None)
@@ -326,12 +324,13 @@ if user_text:
     with st.chat_message("user"):
         st.markdown(user_text)
 
-    # 2️⃣ RAG（可选，失败不崩）
+    # 2️⃣ RAG（可选）
     rag_context = ""
     if use_rag:
         try:
             rag_context = retrieve_context(agent_id, user_text, k=topk)
         except Exception as e:
+            # 这里不再刷屏，只提示一次
             st.warning(f"RAG 暂不可用，已自动跳过。原因：{e}")
             rag_context = ""
 
@@ -366,3 +365,4 @@ with st.expander("🧪 调试面板", expanded=False):
     st.write("agent_id：", agent_id)
     st.write("模型：", model_name)
     st.write("RAG：", use_rag, "TopK=", topk)
+    st.write("KB path：", str(KB_DIR / agent_id))
