@@ -324,10 +324,25 @@ if user_text:
 
     with st.chat_message("assistant"):
         with st.spinner("思考中…"):
-            resp = llm.invoke(messages)
-            st.markdown(resp.content)
+          def extract_text(resp) -> str:
+    # Gemini / LangChain 兼容处理
+    if isinstance(resp.content, str):
+        return resp.content
+    if isinstance(resp.content, list):
+        return "".join(
+            block.get("text", "")
+            for block in resp.content
+            if isinstance(block, dict)
+        )
+    return str(resp.content)
 
-    chat.append(AIMessage(content=resp.content))
+
+resp = llm.invoke(messages)
+answer = extract_text(resp)
+
+st.markdown(answer)
+chat.append(AIMessage(content=answer))
+
 
 
 # =========================
