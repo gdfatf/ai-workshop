@@ -2,15 +2,16 @@ from __future__ import annotations
 
 from pathlib import Path
 import os
-
 import streamlit as st
 
-# LangChain + Gemini
-from langchain_google_genai import ChatGoogleGenerativeAI, GoogleGenerativeAIEmbeddings
+from dotenv import load_dotenv
 
 # LangChain core
 from langchain_core.messages import HumanMessage, AIMessage, SystemMessage
 from langchain_core.documents import Document
+
+# LangChain + Gemini
+from langchain_google_genai import ChatGoogleGenerativeAI, GoogleGenerativeAIEmbeddings
 
 # RAG / Vector DB
 from langchain_text_splitters import RecursiveCharacterTextSplitter
@@ -29,26 +30,32 @@ st.title("🧰 AI Workbench · 13 Agents + RAG（Gemini 3 Pro）")
 
 
 # =========================
-# Secrets 读取（Streamlit Cloud）
+# Secrets / Env 读取
 # =========================
-from dotenv import load_dotenv
 load_dotenv()
 
 def sget(key: str, default: str | None = None) -> str | None:
-    # 先尝试读 Streamlit Cloud secrets（如果本地没有 secrets.toml，会抛 FileNotFoundError）
+    """
+    先读 Streamlit Cloud secrets；
+    本地没有 secrets.toml 时，st.secrets 会抛 FileNotFoundError -> 兜底读环境变量
+    """
     try:
+        # st.secrets 存在但本地没文件时，会在访问/包含判断时触发 FileNotFoundError
         if key in st.secrets:
             return str(st.secrets[key])
     except FileNotFoundError:
-        pass  # 本地没 secrets.toml 很正常
+        pass
+    except Exception:
+        # 极端情况下 secrets 解析异常，也兜底 env
+        pass
 
-    # 本地兜底：读环境变量（.env 已 load_dotenv）
     return os.getenv(key, default)
-
 
 
 GOOGLE_API_KEY = sget("GOOGLE_API_KEY")
 GEMINI_MODEL = sget("GEMINI_MODEL", "gemini-3-pro-preview")
+# 推荐：Gemini embedding 模型名带 models/ 前缀
+GEMINI_EMBEDDING_MODEL = sget("GEMINI_EMBEDDING_MODEL", "models/gemini-embedding-001")
 APP_PASSWORD = sget("APP_PASSWORD", "")
 
 if not GOOGLE_API_KEY:
@@ -64,15 +71,14 @@ if APP_PASSWORD:
         st.session_state.authed = False
 
     if not st.session_state.authed:
-        with st.container():
-            st.subheader("🔒 请输入访问密码")
-            pwd = st.text_input("Password", type="password")
-            if st.button("进入"):
-                if pwd == APP_PASSWORD:
-                    st.session_state.authed = True
-                    st.rerun()
-                else:
-                    st.error("密码不正确")
+        st.subheader("🔒 请输入访问密码")
+        pwd = st.text_input("Password", type="password")
+        if st.button("进入"):
+            if pwd == APP_PASSWORD:
+                st.session_state.authed = True
+                st.rerun()
+            else:
+                st.error("密码不正确")
         st.stop()
 
 
@@ -81,7 +87,7 @@ if APP_PASSWORD:
 # =========================
 PROMPTS_DIR = Path("agents") / "prompts"
 KB_DIR = Path("kb")
-DB_DIR = Path(".chroma_db")  # Streamlit Cloud: 持久化在容器内（重启可能丢失，但运行中可用）
+DB_DIR = Path(".chroma_db")  # Streamlit Cloud: 容器内可用；重启可能丢失
 
 PROMPTS_DIR.mkdir(parents=True, exist_ok=True)
 KB_DIR.mkdir(parents=True, exist_ok=True)
@@ -118,13 +124,13 @@ def load_prompt(filename: str) -> str:
 
 def load_docx_text(path: Path) -> str:
     doc = DocxDocument(str(path))
-    parts = [p.text for p in doc.paragraphs if p.text.strip()]
+    parts = [p.text for p in doc.paragraphs if p.text and p.text.strip()]
     return "\n".join(parts)
 
 
 def load_kb_documents(agent_id: str) -> list[Document]:
     """
-    从 kb/agent_XX/ 读取 docx/txt，统一成 LangChain Document
+    从 kb/agent_XX/ 读取 docx/txt -> LangChain Document
     """
     folder = KB_DIR / agent_id
     folder.mkdir(parents=True, exist_ok=True)
@@ -134,42 +140,50 @@ def load_kb_documents(agent_id: str) -> list[Document]:
         if p.is_dir():
             continue
 
-        if p.suffix.lower() == ".txt":
+        suf = p.suffix.lower()
+        if suf == ".txt":
             docs.extend(TextLoader(str(p), encoding="utf-8").load())
-
-        elif p.suffix.lower() == ".docx":
+        elif suf == ".docx":
             text = load_docx_text(p)
-            docs.append(Document(page_content=text, metadata={"source": str(p)}))
-
+            if text.strip():
+                docs.append(Document(page_content=text, metadata={"source": str(p)}))
     return docs
 
 
 def build_embeddings() -> GoogleGenerativeAIEmbeddings:
-    # 兜底顺序：优先 text-embedding-004，其次 embedding-001
-    candidates = ["text-embedding-004", "models/embedding-001"]
-    last_err = None
+    """
+    Gemini Embedding：优先用 secrets/env 指定的 GEMINI_EMBEDDING_MODEL；
+    如果不可用，则再尝试一个常见备选。
+    """
+    candidates = [
+        GEMINI_EMBEDDING_MODEL,          # 默认 models/gemini-embedding-001
+        "models/text-embedding-004",     # 某些账号/地区可用；不可用会抛错
+    ]
 
+    last_err = None
     for m in candidates:
         try:
             emb = GoogleGenerativeAIEmbeddings(
                 model=m,
                 google_api_key=GOOGLE_API_KEY,
             )
-            # 触发一次小请求做校验
-            _ = emb.embed_query("ping")
+            _ = emb.embed_query("ping")  # 触发一次小请求校验
             return emb
         except Exception as e:
             last_err = e
 
-    raise RuntimeError(f"没有可用的 embedding 模型，请检查账号权限/地区/版本。最后错误：{last_err}")
+    raise RuntimeError(
+        "没有可用的 embedding 模型，请检查账号权限/地区/版本。"
+        f"最后错误：{last_err}"
+    )
 
 
 @st.cache_resource(show_spinner=False)
 def get_vectorstore(agent_id: str):
-    embeddings = GoogleGenerativeAIEmbeddings(
-        model="models/text-embedding-004",
-        google_api_key=GOOGLE_API_KEY,
-    )
+    """
+    每个 agent 一个 Chroma 索引（本地持久化到 .chroma_db/agent_id）
+    """
+    embeddings = build_embeddings()
 
     persist_dir = DB_DIR / agent_id
     persist_dir.mkdir(parents=True, exist_ok=True)
@@ -180,6 +194,7 @@ def get_vectorstore(agent_id: str):
         persist_directory=str(persist_dir),
     )
 
+    # 为空则写入
     try:
         existing = vs._collection.count()
     except Exception:
@@ -188,10 +203,7 @@ def get_vectorstore(agent_id: str):
     if existing == 0:
         raw_docs = load_kb_documents(agent_id)
         if raw_docs:
-            splitter = RecursiveCharacterTextSplitter(
-                chunk_size=900,
-                chunk_overlap=120,
-            )
+            splitter = RecursiveCharacterTextSplitter(chunk_size=900, chunk_overlap=120)
             chunks = splitter.split_documents(raw_docs)
             vs.add_documents(chunks)
             vs.persist()
@@ -199,15 +211,9 @@ def get_vectorstore(agent_id: str):
     return vs
 
 
-
 def retrieve_context(agent_id: str, query: str, k: int = 4) -> str:
     vs = get_vectorstore(agent_id)
-
-    try:
-        docs = vs.similarity_search(query, k=k)
-    except Exception:
-        docs = []
-
+    docs = vs.similarity_search(query, k=k) if vs else []
     if not docs:
         return ""
 
@@ -233,16 +239,21 @@ with st.sidebar:
     st.header("设置")
 
     st.write("Gemini Key exists:", True)
-    st.write("Gemini Model (default):", GEMINI_MODEL)
+    st.write("Default Gemini Model:", GEMINI_MODEL)
+    st.write("Embedding Model:", GEMINI_EMBEDDING_MODEL)
 
     agent_name = st.selectbox("选择 Agent", list(AGENTS.keys()))
 
-    # 模型：给你一个可选下拉（默认 Gemini 3 Pro）
+    model_options = [
+        "gemini-3-pro-preview",
+        "gemini-3-flash-preview",
+        "gemini-1.5-pro",
+        "gemini-1.5-flash",
+    ]
     model_name = st.selectbox(
         "模型",
-        ["gemini-3-pro-preview", "gemini-3-flash-preview", "gemini-1.5-pro", "gemini-1.5-flash"],
-        index=0 if GEMINI_MODEL not in ["gemini-3-pro-preview", "gemini-3-flash-preview", "gemini-1.5-pro", "gemini-1.5-flash"]
-        else ["gemini-3-pro-preview", "gemini-3-flash-preview", "gemini-1.5-pro", "gemini-1.5-flash"].index(GEMINI_MODEL),
+        model_options,
+        index=model_options.index(GEMINI_MODEL) if GEMINI_MODEL in model_options else 0,
     )
 
     temperature = st.slider("temperature", 0.0, 1.0, 0.3, 0.05)
@@ -293,7 +304,12 @@ if user_text:
 
     rag_context = ""
     if use_rag:
-        rag_context = retrieve_context(agent_id, user_text, k=topk)
+        try:
+            rag_context = retrieve_context(agent_id, user_text, k=topk)
+        except Exception as e:
+            # embedding/向量库挂了：不让整站崩
+            st.warning(f"RAG 暂不可用，已自动跳过。原因：{e}")
+            rag_context = ""
 
     sys = system_prompt
     if rag_context:
@@ -315,7 +331,7 @@ if user_text:
 
 
 # =========================
-# 右侧：辅助面板（可选）
+# 调试面板
 # =========================
 with st.expander("🧪 调试面板", expanded=False):
     st.write("当前 Agent：", agent_name)
