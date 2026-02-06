@@ -252,6 +252,31 @@ with st.sidebar:
     st.write("Gemini Key exists:", True)
     st.write("Default model:", GEMINI_MODEL_DEFAULT)
 
+    with st.sidebar:
+    st.header("设置")
+
+    st.write("Gemini Key exists:", True)
+    st.write("Gemini Model (default):", GEMINI_MODEL)
+
+    # ===== Embedding 诊断（临时）=====
+    from langchain_google_genai import GoogleGenerativeAIEmbeddings
+
+    st.divider()
+    st.caption("🔍 Embedding 可用性自检")
+
+    try:
+        emb = GoogleGenerativeAIEmbeddings(
+            model="text-embedding-004",
+            google_api_key=GOOGLE_API_KEY,
+        )
+        vec = emb.embed_query("ping")
+        st.success(f"Embedding OK ✅ 维度 = {len(vec)}")
+    except Exception as e:
+        st.error(f"Embedding FAILED ❌ {type(e).__name__}")
+        st.code(str(e))
+
+    agent_name = st.selectbox("选择 Agent", list(AGENTS.keys()))
+
     agent_name = st.selectbox("选择 Agent", list(AGENTS.keys()))
 
     model_candidates = [
