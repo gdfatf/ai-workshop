@@ -7,31 +7,32 @@ from typing import Optional, List
 import streamlit as st
 from dotenv import load_dotenv
 
-# LangChain + Gemini
-from langchain_google_genai import ChatGoogleGenerativeAI, GoogleGenerativeAIEmbeddings
+# ========= LangChain / Providers =========
+from langchain_google_genai import ChatGoogleGenerativeAI
+from langchain_openai import OpenAIEmbeddings
 
-# LangChain core
+# ========= LangChain core =========
 from langchain_core.messages import HumanMessage, AIMessage, SystemMessage
 from langchain_core.documents import Document
 
-# RAG / Vector DB
+# ========= RAG / Vector DB =========
 from langchain_text_splitters import RecursiveCharacterTextSplitter
 from langchain_community.document_loaders import TextLoader
 from langchain_community.vectorstores import Chroma
 
-# DOCX loader
+# ========= DOCX loader =========
 from docx import Document as DocxDocument
 
 
 # =========================
 # Streamlit 基础设置
 # =========================
-st.set_page_config(page_title="AI Workbench · Gemini", layout="wide")
-st.title("🧰 AI Workbench · 13 Agents + RAG（Gemini 3 Pro）")
+st.set_page_config(page_title="AI Workbench · Gemini + OpenAI RAG", layout="wide")
+st.title("🧰 AI Workbench · 13 Agents + RAG（Gemini LLM + OpenAI Embedding）")
 
 
 # =========================
-# Secrets / Env 读取
+# Env/Secrets
 # =========================
 load_dotenv()
 
@@ -40,23 +41,29 @@ def sget(key: str, default: Optional[str] = None) -> Optional[str]:
     """
     Streamlit Cloud: 优先 st.secrets
     本地：兜底 os.getenv（已 load_dotenv）
-    注意：本地没有 secrets.toml 时，st.secrets 的 __contains__ 会抛 FileNotFoundError
+    注意：本地没有 secrets.toml 时，st.secrets 的 contains 会抛 FileNotFoundError
     """
     try:
-        if key in st.secrets:
+        if hasattr(st, "secrets") and key in st.secrets:
             return str(st.secrets[key])
     except FileNotFoundError:
         pass
-
     return os.getenv(key, default)
 
 
 GOOGLE_API_KEY = sget("GOOGLE_API_KEY")
-GEMINI_MODEL_DEFAULT = sget("GEMINI_MODEL", "gemini-3-pro-preview")
+OPENAI_API_KEY = sget("OPENAI_API_KEY")
 APP_PASSWORD = sget("APP_PASSWORD", "")
 
+GEMINI_MODEL_DEFAULT = sget("GEMINI_MODEL", "gemini-1.5-pro")  # 你也可以改成 gemini-3-pro-*（以你账号可用为准）
+OPENAI_EMBED_MODEL_DEFAULT = sget("OPENAI_EMBED_MODEL", "text-embedding-3-large")
+
 if not GOOGLE_API_KEY:
-    st.error("缺少 GOOGLE_API_KEY：请在 Streamlit Cloud 的 Secrets 里配置 GOOGLE_API_KEY。")
+    st.error("缺少 GOOGLE_API_KEY：请在 Streamlit Secrets 或本地 .env 中配置。")
+    st.stop()
+
+if not OPENAI_API_KEY:
+    st.error("缺少 OPENAI_API_KEY：请在 Streamlit Secrets 或本地 .env 中配置（用于 Embedding / RAG）。")
     st.stop()
 
 
@@ -70,7 +77,7 @@ if APP_PASSWORD:
     if not st.session_state.authed:
         st.subheader("🔒 请输入访问密码")
         pwd = st.text_input("Password", type="password", key="pwd_input")
-        if st.button("进入", key="pwd_enter_btn"):
+        if st.button("进入", key="pwd_btn"):
             if pwd == APP_PASSWORD:
                 st.session_state.authed = True
                 st.rerun()
@@ -84,7 +91,7 @@ if APP_PASSWORD:
 # =========================
 PROMPTS_DIR = Path("agents") / "prompts"
 KB_DIR = Path("kb")
-DB_DIR = Path(".chroma_db")
+DB_DIR = Path(".chroma_db")  # Streamlit Cloud: 容器内目录（重启可能丢，但运行中可用）
 
 PROMPTS_DIR.mkdir(parents=True, exist_ok=True)
 KB_DIR.mkdir(parents=True, exist_ok=True)
@@ -120,7 +127,7 @@ def load_prompt(filename: str) -> str:
 
 def load_docx_text(path: Path) -> str:
     doc = DocxDocument(str(path))
-    parts = [p.text for p in doc.paragraphs if p.text.strip()]
+    parts = [p.text for p in doc.paragraphs if p.text and p.text.strip()]
     return "\n".join(parts)
 
 
@@ -139,7 +146,6 @@ def load_kb_documents(agent_id: str) -> List[Document]:
 
         if suf == ".txt":
             docs.extend(TextLoader(str(p), encoding="utf-8").load())
-
         elif suf == ".docx":
             text = load_docx_text(p)
             if text.strip():
@@ -148,83 +154,9 @@ def load_kb_documents(agent_id: str) -> List[Document]:
     return docs
 
 
-def build_embeddings_or_none():
-    """
-    ✅ 只用 text-embedding-004
-    不可用则返回 None（上层自动关闭 RAG）
-    """
-    try:
-        emb = GoogleGenerativeAIEmbeddings(
-            model="text-embedding-004",
-            google_api_key=GOOGLE_API_KEY,
-        )
-        _ = emb.embed_query("ping")
-        return emb
-    except Exception:
-        return None
-
-
-@st.cache_resource(show_spinner=False)
-def get_vectorstore(agent_id: str):
-    """
-    每个 agent 一个 Chroma collection（带版本号避免缓存/旧库影响）
-    """
-    embeddings = build_embeddings_or_none()
-    if embeddings is None:
-        raise RuntimeError("Embedding 不可用：text-embedding-004 无法调用（权限/地区/Key 可能不支持）。")
-
-    persist_dir = DB_DIR / agent_id
-    persist_dir.mkdir(parents=True, exist_ok=True)
-
-    vs = Chroma(
-        collection_name=f"kb_{agent_id}_v2",
-        embedding_function=embeddings,
-        persist_directory=str(persist_dir),
-    )
-
-    try:
-        existing = vs._collection.count()
-    except Exception:
-        existing = 0
-
-    if existing == 0:
-        raw_docs = load_kb_documents(agent_id)
-        if raw_docs:
-            splitter = RecursiveCharacterTextSplitter(
-                chunk_size=900,
-                chunk_overlap=120,
-            )
-            chunks = splitter.split_documents(raw_docs)
-            vs.add_documents(chunks)
-            vs.persist()
-
-    return vs
-
-
-def retrieve_context(agent_id: str, query: str, k: int = 4) -> str:
-    vs = get_vectorstore(agent_id)
-    docs = vs.similarity_search(query, k=k)
-    if not docs:
-        return ""
-
-    blocks = []
-    for i, d in enumerate(docs, 1):
-        src = d.metadata.get("source", "kb")
-        blocks.append(f"[片段{i} | 来源: {src}]\n{d.page_content}")
-    return "\n\n".join(blocks)
-
-
-def build_llm(model_name: str, temperature: float):
-    return ChatGoogleGenerativeAI(
-        model=model_name,
-        temperature=temperature,
-        google_api_key=GOOGLE_API_KEY,
-    )
-
-
 def extract_text(resp) -> str:
     """
-    解决“乱码”：Gemini/LangChain 有时返回 resp.content 是 list[dict]
+    解决“乱码”：有时 resp.content 是 list[dict]（例如 [{'type':'text','text':'...'}]）
     """
     content = getattr(resp, "content", resp)
     if isinstance(content, str):
@@ -240,78 +172,110 @@ def extract_text(resp) -> str:
     return str(content)
 
 
+def build_llm(model_name: str, temperature: float) -> ChatGoogleGenerativeAI:
+    return ChatGoogleGenerativeAI(
+        model=model_name,
+        temperature=temperature,
+        google_api_key=GOOGLE_API_KEY,
+    )
+
+
+def build_embeddings(model_name: str) -> OpenAIEmbeddings:
+    # OpenAI Embeddings for RAG
+    return OpenAIEmbeddings(
+        model=model_name,
+        api_key=OPENAI_API_KEY,
+    )
+
+
+@st.cache_resource(show_spinner=False)
+def get_vectorstore(agent_id: str, embed_model: str):
+    """
+    每个 agent 一个 Chroma collection
+    collection_name 带 embed_model，避免你切 embedding 模型时旧库混乱
+    """
+    embeddings = build_embeddings(embed_model)
+
+    persist_dir = DB_DIR / agent_id
+    persist_dir.mkdir(parents=True, exist_ok=True)
+
+    safe_model = embed_model.replace("/", "_").replace(":", "_")
+    collection_name = f"kb_{agent_id}__{safe_model}"
+
+    vs = Chroma(
+        collection_name=collection_name,
+        embedding_function=embeddings,
+        persist_directory=str(persist_dir),
+    )
+
+    # 如果空库：写入 kb
+    try:
+        existing = vs._collection.count()
+    except Exception:
+        existing = 0
+
+    if existing == 0:
+        raw_docs = load_kb_documents(agent_id)
+        if raw_docs:
+            splitter = RecursiveCharacterTextSplitter(chunk_size=900, chunk_overlap=120)
+            chunks = splitter.split_documents(raw_docs)
+            vs.add_documents(chunks)
+            vs.persist()
+
+    return vs
+
+
+def retrieve_context(agent_id: str, query: str, k: int, embed_model: str) -> str:
+    vs = get_vectorstore(agent_id, embed_model=embed_model)
+    docs = vs.similarity_search(query, k=k)
+    if not docs:
+        return ""
+
+    blocks = []
+    for i, d in enumerate(docs, 1):
+        src = d.metadata.get("source", "kb")
+        blocks.append(f"[片段{i} | 来源: {src}]\n{d.page_content}")
+    return "\n\n".join(blocks)
+
+
 # =========================
-# Sidebar UI（✅ 修复：不重复控件 + 全部加 key）
+# Sidebar UI
 # =========================
 with st.sidebar:
     st.header("设置")
 
-    st.write("Gemini Key exists:", True)
-    st.write("Default model:", GEMINI_MODEL_DEFAULT)
-
-    st.divider()
-    st.caption("🔍 Embedding 可用性自检（text-embedding-004）")
-
-    emb_ok = False
-    try:
-        emb = GoogleGenerativeAIEmbeddings(
-            model="text-embedding-004",
-            google_api_key=GOOGLE_API_KEY,
-        )
-        vec = emb.embed_query("ping")
-        st.success(f"Embedding OK ✅ 维度 = {len(vec)}")
-        emb_ok = True
-    except Exception as e:
-        st.error(f"Embedding FAILED ❌ {type(e).__name__}")
-        st.code(str(e))
-        emb_ok = False
+    st.caption("Keys 检查")
+    st.write("GOOGLE_API_KEY exists:", True)
+    st.write("OPENAI_API_KEY exists:", True)
 
     st.divider()
 
-    agent_name = st.selectbox(
-        "选择 Agent",
-        list(AGENTS.keys()),
-        key="sb_agent_name",
-    )
+    agent_name = st.selectbox("选择 Agent", list(AGENTS.keys()), key="agent_select")
 
-    model_candidates = [
-        "gemini-3-pro-preview",
-        "gemini-3-flash-preview",
+    # Gemini 模型（以你账号可用为准；如果 3.0 pro 的名字与你账号不同，直接改这里候选项）
+    gemini_candidates = [
         "gemini-1.5-pro",
         "gemini-1.5-flash",
+        "gemini-3-pro-preview",
+        "gemini-3-flash-preview",
     ]
-    default_model = GEMINI_MODEL_DEFAULT if GEMINI_MODEL_DEFAULT in model_candidates else model_candidates[0]
+    gemini_default = GEMINI_MODEL_DEFAULT if GEMINI_MODEL_DEFAULT in gemini_candidates else gemini_candidates[0]
+    model_name = st.selectbox("LLM（Gemini）", gemini_candidates, index=gemini_candidates.index(gemini_default), key="llm_select")
 
-    model_name = st.selectbox(
-        "模型",
-        model_candidates,
-        index=model_candidates.index(default_model),
-        key="sb_model_name",
-    )
+    # OpenAI Embedding 模型
+    embed_candidates = [
+        "text-embedding-3-large",
+        "text-embedding-3-small",
+    ]
+    embed_default = OPENAI_EMBED_MODEL_DEFAULT if OPENAI_EMBED_MODEL_DEFAULT in embed_candidates else embed_candidates[0]
+    embed_model = st.selectbox("Embedding（OpenAI）", embed_candidates, index=embed_candidates.index(embed_default), key="embed_select")
 
-    temperature = st.slider(
-        "temperature",
-        0.0, 1.0, 0.3, 0.05,
-        key="sb_temperature",
-    )
+    temperature = st.slider("temperature", 0.0, 1.0, 0.3, 0.05, key="temp_slider")
 
-    use_rag = st.toggle(
-        "启用 RAG（从 kb 检索）",
-        value=True,
-        key="sb_use_rag",
-    )
-    topk = st.slider(
-        "检索 TopK",
-        1, 8, 4, 1,
-        key="sb_topk",
-    )
+    use_rag = st.toggle("启用 RAG（从 kb 检索）", value=True, key="rag_toggle")
+    topk = st.slider("检索 TopK", 1, 8, 4, 1, key="topk_slider")
 
-    # Embedding 不可用：自动禁用 RAG
-    if use_rag and (not emb_ok):
-        st.warning("当前账号暂不可用 Embedding（text-embedding-004 调用失败），已自动关闭 RAG。")
-        use_rag = False
-
-    if st.button("清空当前 Agent 对话", key="sb_clear_chat"):
+    if st.button("清空当前 Agent 对话", key="clear_chat_btn"):
         st.session_state.pop(f"chat::{agent_name}", None)
         st.rerun()
 
@@ -355,15 +319,14 @@ if user_text:
     with st.chat_message("user"):
         st.markdown(user_text)
 
-    # 2) RAG（可选）
+    # 2) RAG（强制稳定：如果 RAG 打不开就直接报错停下，避免“看似可用其实没检索”）
     rag_context = ""
     if use_rag:
         try:
-            rag_context = retrieve_context(agent_id, user_text, k=topk)
+            rag_context = retrieve_context(agent_id, user_text, k=topk, embed_model=embed_model)
         except Exception as e:
-            # 不刷屏：只在当前轮提示一次
-            st.warning(f"RAG 暂不可用，已自动跳过。原因：{e}")
-            rag_context = ""
+            st.error(f"RAG / Embedding 初始化失败：{e}")
+            st.stop()
 
     # 3) system prompt 拼装
     sys = system_prompt
@@ -388,12 +351,10 @@ if user_text:
     chat.append(AIMessage(content=answer))
 
 
-# =========================
-# 调试面板
-# =========================
 with st.expander("🧪 调试面板", expanded=False):
-    st.write("当前 Agent：", agent_name)
+    st.write("Agent：", agent_name)
     st.write("agent_id：", agent_id)
-    st.write("模型：", model_name)
+    st.write("LLM：", model_name)
+    st.write("Embedding：", embed_model)
     st.write("RAG：", use_rag, "TopK=", topk)
     st.write("KB path：", str(KB_DIR / agent_id))

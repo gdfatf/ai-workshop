@@ -1,24 +1,22 @@
-# ===== Python =====
+# Python
 __pycache__/
 *.pyc
 *.pyo
 *.pyd
 
-# ===== Virtual Env =====
+# venv
 .venv/
 venv/
-env/
 
-# ===== Env & Secrets =====
+# env
 .env
 
-# ===== Vector DB / Cache =====
+# Streamlit
+.streamlit/
+
+# Chroma local db
 .chroma_db/
+*.sqlite3
 
-# ===== OS =====
+# OS
 .DS_Store
-Thumbs.db
-
-# ===== IDE =====
-.vscode/
-.idea/
