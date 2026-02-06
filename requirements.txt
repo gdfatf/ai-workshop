@@ -1,8 +1,13 @@
 streamlit
+python-dotenv
+
 langchain
+langchain-core
 langchain-community
 langchain-text-splitters
+
 langchain-google-genai
 google-generativeai
-python-docx
+
 chromadb
+python-docx
