@@ -165,12 +165,11 @@ def build_embeddings() -> GoogleGenerativeAIEmbeddings:
 
 
 @st.cache_resource(show_spinner=False)
-def get_vectorstore(agent_id: str) -> Chroma:
-    """
-    每个 agent 一个 Chroma 索引（本地持久化目录）。
-    kb 为空也能正常返回空库。
-    """
-    embeddings = build_embeddings()
+def get_vectorstore(agent_id: str):
+    embeddings = GoogleGenerativeAIEmbeddings(
+        model="models/text-embedding-004",
+        google_api_key=GOOGLE_API_KEY,
+    )
 
     persist_dir = DB_DIR / agent_id
     persist_dir.mkdir(parents=True, exist_ok=True)
@@ -181,7 +180,6 @@ def get_vectorstore(agent_id: str) -> Chroma:
         persist_directory=str(persist_dir),
     )
 
-    # 如果库为空就写入
     try:
         existing = vs._collection.count()
     except Exception:
@@ -190,15 +188,16 @@ def get_vectorstore(agent_id: str) -> Chroma:
     if existing == 0:
         raw_docs = load_kb_documents(agent_id)
         if raw_docs:
-            splitter = RecursiveCharacterTextSplitter(chunk_size=900, chunk_overlap=120)
+            splitter = RecursiveCharacterTextSplitter(
+                chunk_size=900,
+                chunk_overlap=120,
+            )
             chunks = splitter.split_documents(raw_docs)
             vs.add_documents(chunks)
-            try:
-                vs.persist()
-            except Exception:
-                pass
+            vs.persist()
 
     return vs
+
 
 
 def retrieve_context(agent_id: str, query: str, k: int = 4) -> str:
