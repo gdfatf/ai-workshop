@@ -2,7 +2,7 @@ from __future__ import annotations
 
 from pathlib import Path
 import os
-from typing import Optional, List
+from typing import Optional, List, Any, Dict
 
 import streamlit as st
 from dotenv import load_dotenv
@@ -23,12 +23,15 @@ from langchain_community.vectorstores import Chroma
 # ========= DOCX loader =========
 from docx import Document as DocxDocument
 
+# ========= Supabase =========
+from supabase import create_client, Client
+
 
 # =========================
 # Streamlit 基础设置
 # =========================
-st.set_page_config(page_title="AI Workbench · Gemini + OpenAI RAG", layout="wide")
-st.title("🧰 AI Workbench · 13 Agents + RAG（Gemini LLM + OpenAI Embedding）")
+st.set_page_config(page_title="AI Workbench · Gemini + OpenAI RAG + Supabase Memory", layout="wide")
+st.title("🧰 AI Workbench · 13 Agents + RAG（Gemini LLM + OpenAI Embedding）+ Supabase 记忆")
 
 
 # =========================
@@ -55,8 +58,11 @@ GOOGLE_API_KEY = sget("GOOGLE_API_KEY")
 OPENAI_API_KEY = sget("OPENAI_API_KEY")
 APP_PASSWORD = sget("APP_PASSWORD", "")
 
-GEMINI_MODEL_DEFAULT = sget("GEMINI_MODEL", "gemini-1.5-pro")  # 你也可以改成 gemini-3-pro-*（以你账号可用为准）
+GEMINI_MODEL_DEFAULT = sget("GEMINI_MODEL", "gemini-1.5-pro")
 OPENAI_EMBED_MODEL_DEFAULT = sget("OPENAI_EMBED_MODEL", "text-embedding-3-large")
+
+SUPABASE_URL = sget("SUPABASE_URL")
+SUPABASE_SERVICE_ROLE_KEY = sget("SUPABASE_SERVICE_ROLE_KEY")
 
 if not GOOGLE_API_KEY:
     st.error("缺少 GOOGLE_API_KEY：请在 Streamlit Secrets 或本地 .env 中配置。")
@@ -65,6 +71,18 @@ if not GOOGLE_API_KEY:
 if not OPENAI_API_KEY:
     st.error("缺少 OPENAI_API_KEY：请在 Streamlit Secrets 或本地 .env 中配置（用于 Embedding / RAG）。")
     st.stop()
+
+if not SUPABASE_URL or not SUPABASE_SERVICE_ROLE_KEY:
+    st.error("缺少 SUPABASE_URL / SUPABASE_SERVICE_ROLE_KEY：请在 Streamlit Secrets 配置（用于记忆存储）。")
+    st.stop()
+
+
+@st.cache_resource(show_spinner=False)
+def get_supabase() -> Client:
+    return create_client(SUPABASE_URL, SUPABASE_SERVICE_ROLE_KEY)
+
+
+sb = get_supabase()
 
 
 # =========================
@@ -115,6 +133,77 @@ AGENTS = {
 
 
 # =========================
+# Supabase Memory (per user_id + agent_id)
+# Table: public.workbench_memory
+# Columns: user_id text, agent_id text, messages jsonb, updated_at timestamptz
+# PK: (user_id, agent_id)
+# =========================
+def db_load_chat(user_id: str, agent_id: str) -> List[Dict[str, str]]:
+    """
+    返回: [{"role":"user/assistant/system", "content":"..."}]
+    """
+    try:
+        resp = (
+            sb.table("workbench_memory")
+            .select("messages")
+            .eq("user_id", user_id)
+            .eq("agent_id", agent_id)
+            .execute()
+        )
+        data = resp.data
+        if not data:
+            return []
+        row = data[0] if isinstance(data, list) else data
+        msgs = row.get("messages", [])
+        return msgs if isinstance(msgs, list) else []
+    except Exception:
+        return []
+
+
+def db_save_chat(user_id: str, agent_id: str, messages: List[Dict[str, str]]) -> None:
+    try:
+        sb.table("workbench_memory").upsert(
+            {
+                "user_id": user_id,
+                "agent_id": agent_id,
+                "messages": messages,
+            }
+        ).execute()
+    except Exception:
+        pass
+
+
+def db_clear_chat(user_id: str, agent_id: str) -> None:
+    db_save_chat(user_id, agent_id, [])
+
+
+def lc_to_json(messages: List[Any]) -> List[Dict[str, str]]:
+    out: List[Dict[str, str]] = []
+    for m in messages:
+        if isinstance(m, HumanMessage):
+            out.append({"role": "user", "content": m.content})
+        elif isinstance(m, AIMessage):
+            out.append({"role": "assistant", "content": m.content})
+        elif isinstance(m, SystemMessage):
+            out.append({"role": "system", "content": m.content})
+    return out
+
+
+def json_to_lc(items: List[Dict[str, str]]) -> List[Any]:
+    out: List[Any] = []
+    for it in items:
+        role = it.get("role")
+        content = it.get("content", "")
+        if role == "user":
+            out.append(HumanMessage(content=content))
+        elif role == "assistant":
+            out.append(AIMessage(content=content))
+        elif role == "system":
+            out.append(SystemMessage(content=content))
+    return out
+
+
+# =========================
 # 工具函数
 # =========================
 def load_prompt(filename: str) -> str:
@@ -132,9 +221,6 @@ def load_docx_text(path: Path) -> str:
 
 
 def load_kb_documents(agent_id: str) -> List[Document]:
-    """
-    从 kb/agent_XX/ 读取 docx/txt
-    """
     folder = KB_DIR / agent_id
     folder.mkdir(parents=True, exist_ok=True)
 
@@ -146,6 +232,7 @@ def load_kb_documents(agent_id: str) -> List[Document]:
 
         if suf == ".txt":
             docs.extend(TextLoader(str(p), encoding="utf-8").load())
+
         elif suf == ".docx":
             text = load_docx_text(p)
             if text.strip():
@@ -181,18 +268,14 @@ def build_llm(model_name: str, temperature: float) -> ChatGoogleGenerativeAI:
 
 
 def build_embeddings(model_name: str) -> OpenAIEmbeddings:
-    # OpenAI Embeddings for RAG
-    return OpenAIEmbeddings(
-        model=model_name,
-        api_key=OPENAI_API_KEY,
-    )
+    return OpenAIEmbeddings(model=model_name, api_key=OPENAI_API_KEY)
 
 
 @st.cache_resource(show_spinner=False)
 def get_vectorstore(agent_id: str, embed_model: str):
     """
     每个 agent 一个 Chroma collection
-    collection_name 带 embed_model，避免你切 embedding 模型时旧库混乱
+    collection_name 带 embed_model，避免切 embedding 模型时旧库混乱
     """
     embeddings = build_embeddings(embed_model)
 
@@ -244,15 +327,23 @@ def retrieve_context(agent_id: str, query: str, k: int, embed_model: str) -> str
 with st.sidebar:
     st.header("设置")
 
+    st.subheader("用户身份（用于记忆隔离）")
+    user_id = st.text_input("你的用户ID（每人固定一个）", key="user_id_input")
+
+    if not user_id or not user_id.strip():
+        st.warning("请输入用户ID（例如：姓名拼音/代号），用于保存个人记忆。")
+        st.stop()
+    user_id = user_id.strip()
+
+    st.divider()
     st.caption("Keys 检查")
     st.write("GOOGLE_API_KEY exists:", True)
     st.write("OPENAI_API_KEY exists:", True)
+    st.write("SUPABASE configured:", True)
 
     st.divider()
-
     agent_name = st.selectbox("选择 Agent", list(AGENTS.keys()), key="agent_select")
 
-    # Gemini 模型（以你账号可用为准；如果 3.0 pro 的名字与你账号不同，直接改这里候选项）
     gemini_candidates = [
         "gemini-1.5-pro",
         "gemini-1.5-flash",
@@ -260,23 +351,36 @@ with st.sidebar:
         "gemini-3-flash-preview",
     ]
     gemini_default = GEMINI_MODEL_DEFAULT if GEMINI_MODEL_DEFAULT in gemini_candidates else gemini_candidates[0]
-    model_name = st.selectbox("LLM（Gemini）", gemini_candidates, index=gemini_candidates.index(gemini_default), key="llm_select")
+    model_name = st.selectbox(
+        "LLM（Gemini）",
+        gemini_candidates,
+        index=gemini_candidates.index(gemini_default),
+        key="llm_select",
+    )
 
-    # OpenAI Embedding 模型
     embed_candidates = [
         "text-embedding-3-large",
         "text-embedding-3-small",
     ]
     embed_default = OPENAI_EMBED_MODEL_DEFAULT if OPENAI_EMBED_MODEL_DEFAULT in embed_candidates else embed_candidates[0]
-    embed_model = st.selectbox("Embedding（OpenAI）", embed_candidates, index=embed_candidates.index(embed_default), key="embed_select")
+    embed_model = st.selectbox(
+        "Embedding（OpenAI）",
+        embed_candidates,
+        index=embed_candidates.index(embed_default),
+        key="embed_select",
+    )
 
     temperature = st.slider("temperature", 0.0, 1.0, 0.3, 0.05, key="temp_slider")
 
     use_rag = st.toggle("启用 RAG（从 kb 检索）", value=True, key="rag_toggle")
     topk = st.slider("检索 TopK", 1, 8, 4, 1, key="topk_slider")
 
-    if st.button("清空当前 Agent 对话", key="clear_chat_btn"):
-        st.session_state.pop(f"chat::{agent_name}", None)
+    if st.button("清空当前 Agent 对话（含云端记忆）", key="clear_chat_btn"):
+        # agent_id 需要在主流程里算，但这里也能算
+        agent_file_tmp = AGENTS[agent_name]
+        agent_id_tmp = agent_file_tmp.replace(".txt", "")
+        db_clear_chat(user_id, agent_id_tmp)
+        st.session_state.pop(f"chat::{user_id}::{agent_id_tmp}", None)
         st.rerun()
 
     st.divider()
@@ -293,9 +397,12 @@ agent_id = agent_file.replace(".txt", "")  # agent_01 ... agent_13
 
 llm = build_llm(model_name=model_name, temperature=temperature)
 
-chat_key = f"chat::{agent_name}"
+# ✅ 记忆 key：按 user_id + agent_id 隔离
+chat_key = f"chat::{user_id}::{agent_id}"
 if chat_key not in st.session_state:
-    st.session_state[chat_key] = []
+    raw = db_load_chat(user_id, agent_id)
+    st.session_state[chat_key] = json_to_lc(raw)
+
 chat = st.session_state[chat_key]
 
 with st.expander("查看当前 Agent 的 System Prompt（只读）", expanded=False):
@@ -316,10 +423,12 @@ user_text = st.chat_input(f"正在使用：{agent_name}（可粘贴长文本）"
 if user_text:
     # 1) 记录用户消息
     chat.append(HumanMessage(content=user_text))
+    db_save_chat(user_id, agent_id, lc_to_json(chat))
+
     with st.chat_message("user"):
         st.markdown(user_text)
 
-    # 2) RAG（强制稳定：如果 RAG 打不开就直接报错停下，避免“看似可用其实没检索”）
+    # 2) RAG（如果失败就直接报错停下，避免“看似可用其实没检索”）
     rag_context = ""
     if use_rag:
         try:
@@ -347,11 +456,13 @@ if user_text:
             answer = extract_text(resp)
             st.markdown(answer)
 
-    # 5) 记录 assistant 消息
+    # 5) 记录 assistant 消息并写入 Supabase
     chat.append(AIMessage(content=answer))
+    db_save_chat(user_id, agent_id, lc_to_json(chat))
 
 
 with st.expander("🧪 调试面板", expanded=False):
+    st.write("user_id：", user_id)
     st.write("Agent：", agent_name)
     st.write("agent_id：", agent_id)
     st.write("LLM：", model_name)
