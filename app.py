@@ -30,8 +30,8 @@ from supabase import create_client, Client
 # =========================
 # Streamlit 基础设置
 # =========================
-st.set_page_config(page_title="AI Workbench · Gemini + OpenAI RAG + Supabase Memory", layout="wide")
-st.title("🧰 AI Workbench · 13 Agents + RAG（Gemini LLM + OpenAI Embedding）+ Supabase 记忆")
+st.set_page_config(page_title="AI Workbench · 4-Agent 短视频创作系统", layout="wide")
+st.title("🎬 AI Workbench · 4-Agent 短视频全链路创作系统")
 
 
 # =========================
@@ -41,11 +41,6 @@ load_dotenv()
 
 
 def sget(key: str, default: Optional[str] = None) -> Optional[str]:
-    """
-    Streamlit Cloud: 优先 st.secrets
-    本地：兜底 os.getenv（已 load_dotenv）
-    注意：本地没有 secrets.toml 时，st.secrets 的 contains 会抛 FileNotFoundError
-    """
     try:
         if hasattr(st, "secrets") and key in st.secrets:
             return str(st.secrets[key])
@@ -109,39 +104,35 @@ if APP_PASSWORD:
 # =========================
 PROMPTS_DIR = Path("agents") / "prompts"
 KB_DIR = Path("kb")
-DB_DIR = Path(".chroma_db")  # Streamlit Cloud: 容器内目录（重启可能丢，但运行中可用）
+DB_DIR = Path(".chroma_db")
 
 PROMPTS_DIR.mkdir(parents=True, exist_ok=True)
 KB_DIR.mkdir(parents=True, exist_ok=True)
 DB_DIR.mkdir(parents=True, exist_ok=True)
 
+# =====================================================
+# ✅ 新版 4-Agent 定义（替代原 13-Agent）
+# =====================================================
 AGENTS = {
-    "01 人设定位 Agent": "agent_01.txt",
-    "02 原创灵感讨论 Agent": "agent_02.txt",
-    "03 爆款内容策划 Agent": "agent_03.txt",
-    "04 文案赌注强化 Agent": "agent_04.txt",
-    "05 文案开头强化 Agent": "agent_05.txt",
-    "06 内容人格魅力强化 Agent": "agent_06.txt",
-    "07 文案用户需求强化 Agent": "agent_07.txt",
-    "08 线索转化类内容策划 Agent": "agent_08.txt",
-    "09 内容影像设计 Agent": "agent_09.txt",
-    "10 大纲结构组织 Agent": "agent_10.txt",
-    "11 内容骨架搭建 Agent": "agent_11.txt",
-    "12 整体文案改写 Agent": "agent_12.txt",
-    "13 个人IP账号运营问题诊断 Agent": "agent_13.txt",
+    "A｜账号定位师 · 战略罗盘": "agent_a.txt",
+    "B｜选题架构师 · 爆款引擎": "agent_b.txt",
+    "C｜文案炼金师 · 结构外科": "agent_c.txt",
+    "D｜影像导演 · 情绪建筑师": "agent_d.txt",
+}
+
+# Agent 描述（显示在侧边栏）
+AGENT_DESCRIPTIONS = {
+    "A｜账号定位师 · 战略罗盘": "定位诊断 → 赛道验证 → 变现设计 → 人设锻造",
+    "B｜选题架构师 · 爆款引擎": "灵感捕获 → 选题打磨 → 流量漏斗 → 架构选择",
+    "C｜文案炼金师 · 结构外科": "结构体检 → 钩子手术 → 骨架重排 → 刺点植入 → 语言雕琢",
+    "D｜影像导演 · 情绪建筑师": "情感团块 → 风格定调 → 分镜脚本 → 表演指导",
 }
 
 
 # =========================
-# Supabase Memory (per user_id + agent_id)
-# Table: public.workbench_memory
-# Columns: user_id text, agent_id text, messages jsonb, updated_at timestamptz
-# PK: (user_id, agent_id)
+# Supabase Memory
 # =========================
 def db_load_chat(user_id: str, agent_id: str) -> List[Dict[str, str]]:
-    """
-    返回: [{"role":"user/assistant/system", "content":"..."}]
-    """
     try:
         resp = (
             sb.table("workbench_memory")
@@ -230,7 +221,7 @@ def load_kb_documents(agent_id: str) -> List[Document]:
             continue
         suf = p.suffix.lower()
 
-        if suf == ".txt":
+        if suf in (".txt", ".md"):
             docs.extend(TextLoader(str(p), encoding="utf-8").load())
 
         elif suf == ".docx":
@@ -242,9 +233,6 @@ def load_kb_documents(agent_id: str) -> List[Document]:
 
 
 def extract_text(resp) -> str:
-    """
-    解决“乱码”：有时 resp.content 是 list[dict]（例如 [{'type':'text','text':'...'}]）
-    """
     content = getattr(resp, "content", resp)
     if isinstance(content, str):
         return content
@@ -273,10 +261,6 @@ def build_embeddings(model_name: str) -> OpenAIEmbeddings:
 
 @st.cache_resource(show_spinner=False)
 def get_vectorstore(agent_id: str, embed_model: str):
-    """
-    每个 agent 一个 Chroma collection
-    collection_name 带 embed_model，避免切 embedding 模型时旧库混乱
-    """
     embeddings = build_embeddings(embed_model)
 
     persist_dir = DB_DIR / agent_id
@@ -291,7 +275,6 @@ def get_vectorstore(agent_id: str, embed_model: str):
         persist_directory=str(persist_dir),
     )
 
-    # 如果空库：写入 kb
     try:
         existing = vs._collection.count()
     except Exception:
@@ -300,7 +283,12 @@ def get_vectorstore(agent_id: str, embed_model: str):
     if existing == 0:
         raw_docs = load_kb_documents(agent_id)
         if raw_docs:
-            splitter = RecursiveCharacterTextSplitter(chunk_size=900, chunk_overlap=120)
+            # ✅ 使用 Markdown 感知的分隔符，更好地切分结构化 KB
+            splitter = RecursiveCharacterTextSplitter(
+                chunk_size=1200,
+                chunk_overlap=150,
+                separators=["\n## ", "\n### ", "\n#### ", "\n---", "\n\n", "\n", " "],
+            )
             chunks = splitter.split_documents(raw_docs)
             vs.add_documents(chunks)
             vs.persist()
@@ -325,7 +313,7 @@ def retrieve_context(agent_id: str, query: str, k: int, embed_model: str) -> str
 # Sidebar UI
 # =========================
 with st.sidebar:
-    st.header("设置")
+    st.header("⚙️ 设置")
 
     st.subheader("用户身份（用于记忆隔离）")
     user_id = st.text_input("你的用户ID（每人固定一个）", key="user_id_input")
@@ -336,13 +324,15 @@ with st.sidebar:
     user_id = user_id.strip()
 
     st.divider()
-    st.caption("Keys 检查")
-    st.write("GOOGLE_API_KEY exists:", True)
-    st.write("OPENAI_API_KEY exists:", True)
-    st.write("SUPABASE configured:", True)
+
+    # ✅ Agent 选择 + 描述
+    agent_name = st.selectbox("选择 Agent", list(AGENTS.keys()), key="agent_select")
+
+    desc = AGENT_DESCRIPTIONS.get(agent_name, "")
+    if desc:
+        st.caption(f"📋 {desc}")
 
     st.divider()
-    agent_name = st.selectbox("选择 Agent", list(AGENTS.keys()), key="agent_select")
 
     gemini_candidates = [
         "gemini-1.5-pro",
@@ -372,11 +362,10 @@ with st.sidebar:
 
     temperature = st.slider("temperature", 0.0, 1.0, 0.3, 0.05, key="temp_slider")
 
-    use_rag = st.toggle("启用 RAG（从 kb 检索）", value=True, key="rag_toggle")
+    use_rag = st.toggle("启用 RAG（从 KB 检索）", value=True, key="rag_toggle")
     topk = st.slider("检索 TopK", 1, 8, 4, 1, key="topk_slider")
 
-    if st.button("清空当前 Agent 对话（含云端记忆）", key="clear_chat_btn"):
-        # agent_id 需要在主流程里算，但这里也能算
+    if st.button("🗑️ 清空当前 Agent 对话", key="clear_chat_btn"):
         agent_file_tmp = AGENTS[agent_name]
         agent_id_tmp = agent_file_tmp.replace(".txt", "")
         db_clear_chat(user_id, agent_id_tmp)
@@ -384,8 +373,11 @@ with st.sidebar:
         st.rerun()
 
     st.divider()
-    st.caption("📌 知识库目录：kb/agent_01 ~ kb/agent_13（docx/txt）")
-    st.caption("📌 Prompt 目录：agents/prompts/agent_01.txt ~ agent_13.txt")
+    st.caption("📂 Prompt → agents/prompts/agent_a~d.txt")
+    st.caption("📂 KB → kb/agent_a~d/（.txt .md .docx）")
+
+    st.divider()
+    st.caption("🔄 创作流程：A定位 → B选题 → C文案 → D分镜")
 
 
 # =========================
@@ -393,11 +385,10 @@ with st.sidebar:
 # =========================
 agent_file = AGENTS[agent_name]
 system_prompt = load_prompt(agent_file)
-agent_id = agent_file.replace(".txt", "")  # agent_01 ... agent_13
+agent_id = agent_file.replace(".txt", "")  # agent_a / agent_b / agent_c / agent_d
 
 llm = build_llm(model_name=model_name, temperature=temperature)
 
-# ✅ 记忆 key：按 user_id + agent_id 隔离
 chat_key = f"chat::{user_id}::{agent_id}"
 if chat_key not in st.session_state:
     raw = db_load_chat(user_id, agent_id)
@@ -421,14 +412,12 @@ for msg in chat:
 user_text = st.chat_input(f"正在使用：{agent_name}（可粘贴长文本）")
 
 if user_text:
-    # 1) 记录用户消息
     chat.append(HumanMessage(content=user_text))
     db_save_chat(user_id, agent_id, lc_to_json(chat))
 
     with st.chat_message("user"):
         st.markdown(user_text)
 
-    # 2) RAG（如果失败就直接报错停下，避免“看似可用其实没检索”）
     rag_context = ""
     if use_rag:
         try:
@@ -437,7 +426,6 @@ if user_text:
             st.error(f"RAG / Embedding 初始化失败：{e}")
             st.stop()
 
-    # 3) system prompt 拼装
     sys = system_prompt
     if rag_context:
         sys = (
@@ -449,14 +437,12 @@ if user_text:
 
     messages = [SystemMessage(content=sys)] + chat
 
-    # 4) 调用 LLM + 显示回复
     with st.chat_message("assistant"):
         with st.spinner("思考中…"):
             resp = llm.invoke(messages)
             answer = extract_text(resp)
             st.markdown(answer)
 
-    # 5) 记录 assistant 消息并写入 Supabase
     chat.append(AIMessage(content=answer))
     db_save_chat(user_id, agent_id, lc_to_json(chat))
 
