@@ -324,7 +324,7 @@ with st.sidebar:
 
     st.divider()
 
-    # ✅ Agent 选择 + 描述
+    # Agent 选择
     agent_name = st.selectbox("选择 Agent", list(AGENTS.keys()), key="agent_select")
 
     desc = AGENT_DESCRIPTIONS.get(agent_name, "")
@@ -333,40 +333,45 @@ with st.sidebar:
 
     st.divider()
 
-claude_candidates = [
-    "claude-opus-4-6",
-    "claude-sonnet-4-5",
-    "claude-haiku-3",
-]
+    # Claude 模型选择
+    claude_candidates = [
+        "claude-opus-4-6",
+        "claude-sonnet-4-5",
+        "claude-haiku-3",
+    ]
 
-claude_default = (
-    LLM_MODEL_DEFAULT
-    if LLM_MODEL_DEFAULT in claude_candidates
-    else claude_candidates[0]
-)
+    claude_default = (
+        LLM_MODEL_DEFAULT
+        if LLM_MODEL_DEFAULT in claude_candidates
+        else claude_candidates[0]
+    )
 
-model_name = st.selectbox(
-    "LLM（Claude）",
-    claude_candidates,
-    index=claude_candidates.index(claude_default),
-    key="llm_select",
-)
+    model_name = st.selectbox(
+        "LLM（Claude）",
+        claude_candidates,
+        index=claude_candidates.index(claude_default),
+        key="llm_select",
+    )
 
-embed_candidates = [
-    "text-embedding-3-large",
-    "text-embedding-3-small",
-]
-embed_default = (
-    OPENAI_EMBED_MODEL_DEFAULT
-    if OPENAI_EMBED_MODEL_DEFAULT in embed_candidates
-    else embed_candidates[0]
-)
-embed_model = st.selectbox(
-    "Embedding（OpenAI）",
-    embed_candidates,
-    index=embed_candidates.index(embed_default),
-    key="embed_select",
-)
+    # Embedding 选择
+    embed_candidates = [
+        "text-embedding-3-large",
+        "text-embedding-3-small",
+    ]
+
+    embed_default = (
+        OPENAI_EMBED_MODEL_DEFAULT
+        if OPENAI_EMBED_MODEL_DEFAULT in embed_candidates
+        else embed_candidates[0]
+    )
+
+    embed_model = st.selectbox(
+        "Embedding（OpenAI）",
+        embed_candidates,
+        index=embed_candidates.index(embed_default),
+        key="embed_select",
+    )
+
     temperature = st.slider("temperature", 0.0, 1.0, 0.3, 0.05, key="temp_slider")
 
     use_rag = st.toggle("启用 RAG（从 KB 检索）", value=True, key="rag_toggle")
@@ -385,7 +390,6 @@ embed_model = st.selectbox(
 
     st.divider()
     st.caption("🔄 创作流程：A定位 → B选题 → C文案 → D分镜")
-
 
 # =========================
 # 主流程
