@@ -352,18 +352,21 @@ model_name = st.selectbox(
     key="llm_select",
 )
 
-    embed_candidates = [
-        "text-embedding-3-large",
-        "text-embedding-3-small",
-    ]
-    embed_default = OPENAI_EMBED_MODEL_DEFAULT if OPENAI_EMBED_MODEL_DEFAULT in embed_candidates else embed_candidates[0]
-    embed_model = st.selectbox(
-        "Embedding（OpenAI）",
-        embed_candidates,
-        index=embed_candidates.index(embed_default),
-        key="embed_select",
-    )
-
+embed_candidates = [
+    "text-embedding-3-large",
+    "text-embedding-3-small",
+]
+embed_default = (
+    OPENAI_EMBED_MODEL_DEFAULT
+    if OPENAI_EMBED_MODEL_DEFAULT in embed_candidates
+    else embed_candidates[0]
+)
+embed_model = st.selectbox(
+    "Embedding（OpenAI）",
+    embed_candidates,
+    index=embed_candidates.index(embed_default),
+    key="embed_select",
+)
     temperature = st.slider("temperature", 0.0, 1.0, 0.3, 0.05, key="temp_slider")
 
     use_rag = st.toggle("启用 RAG（从 KB 检索）", value=True, key="rag_toggle")
