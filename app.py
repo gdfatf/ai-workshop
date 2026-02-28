@@ -8,7 +8,7 @@ import streamlit as st
 from dotenv import load_dotenv
 
 # ========= LangChain / Providers =========
-from langchain_google_genai import ChatGoogleGenerativeAI
+from langchain_anthropic import ChatAnthropic
 from langchain_openai import OpenAIEmbeddings
 
 # ========= LangChain core =========
@@ -48,19 +48,18 @@ def sget(key: str, default: Optional[str] = None) -> Optional[str]:
         pass
     return os.getenv(key, default)
 
-
-GOOGLE_API_KEY = sget("GOOGLE_API_KEY")
+ANTHROPIC_API_KEY = sget("ANTHROPIC_API_KEY")
+LLM_MODEL_DEFAULT = sget("LLM_MODEL", "claude-opus-4-6")
 OPENAI_API_KEY = sget("OPENAI_API_KEY")
 APP_PASSWORD = sget("APP_PASSWORD", "")
 
-GEMINI_MODEL_DEFAULT = sget("GEMINI_MODEL", "gemini-1.5-pro")
 OPENAI_EMBED_MODEL_DEFAULT = sget("OPENAI_EMBED_MODEL", "text-embedding-3-large")
 
 SUPABASE_URL = sget("SUPABASE_URL")
 SUPABASE_SERVICE_ROLE_KEY = sget("SUPABASE_SERVICE_ROLE_KEY")
 
-if not GOOGLE_API_KEY:
-    st.error("缺少 GOOGLE_API_KEY：请在 Streamlit Secrets 或本地 .env 中配置。")
+if not ANTHROPIC_API_KEY:
+    st.error("缺少 ANTHROPIC_API_KEY：请在 Streamlit Secrets 或本地 .env 中配置。")
     st.stop()
 
 if not OPENAI_API_KEY:
@@ -104,7 +103,7 @@ if APP_PASSWORD:
 # =========================
 PROMPTS_DIR = Path("agents") / "prompts"
 KB_DIR = Path("kb")
-DB_DIR = Path(".chroma_db")
+DB_DIR = Path("chroma_db")
 
 PROMPTS_DIR.mkdir(parents=True, exist_ok=True)
 KB_DIR.mkdir(parents=True, exist_ok=True)
@@ -247,12 +246,12 @@ def extract_text(resp) -> str:
     return str(content)
 
 
-def build_llm(model_name: str, temperature: float) -> ChatGoogleGenerativeAI:
-    return ChatGoogleGenerativeAI(
+def build_llm(model_name: str, temperature: float) -> ChatAnthropic:
+    return ChatAnthropic(
         model=model_name,
         temperature=temperature,
-        google_api_key=GOOGLE_API_KEY,
     )
+    
 
 
 def build_embeddings(model_name: str) -> OpenAIEmbeddings:
@@ -334,19 +333,24 @@ with st.sidebar:
 
     st.divider()
 
-    gemini_candidates = [
-        "gemini-1.5-pro",
-        "gemini-1.5-flash",
-        "gemini-3-pro-preview",
-        "gemini-3-flash-preview",
-    ]
-    gemini_default = GEMINI_MODEL_DEFAULT if GEMINI_MODEL_DEFAULT in gemini_candidates else gemini_candidates[0]
-    model_name = st.selectbox(
-        "LLM（Gemini）",
-        gemini_candidates,
-        index=gemini_candidates.index(gemini_default),
-        key="llm_select",
-    )
+claude_candidates = [
+    "claude-opus-4-6",
+    "claude-sonnet-4-5",
+    "claude-haiku-3",
+]
+
+claude_default = (
+    LLM_MODEL_DEFAULT
+    if LLM_MODEL_DEFAULT in claude_candidates
+    else claude_candidates[0]
+)
+
+model_name = st.selectbox(
+    "LLM（Claude）",
+    claude_candidates,
+    index=claude_candidates.index(claude_default),
+    key="llm_select",
+)
 
     embed_candidates = [
         "text-embedding-3-large",
