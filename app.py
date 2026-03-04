@@ -249,9 +249,11 @@ def extract_text(resp) -> str:
 def build_llm(model_name: str, temperature: float) -> ChatAnthropic:
     return ChatAnthropic(
         model=model_name,
+        api_key=ANTHROPIC_API_KEY,   # 明确传入，避免 env/secret 读取异常
         temperature=temperature,
-    )
-    
+        max_tokens=4096,             # 关键：显式传，避免 400
+        timeout=120,                 # 可选：避免长请求超时
+    )    
 
 
 def build_embeddings(model_name: str) -> OpenAIEmbeddings:
@@ -335,10 +337,10 @@ with st.sidebar:
 
     # Claude 模型选择
     claude_candidates = [
-        "claude-opus-4-6",
-        "claude-sonnet-4-5",
-        "claude-haiku-3",
-    ]
+    "claude-opus-4-6",
+    "claude-sonnet-4-6",
+    "claude-haiku-4-5",  # alias
+]
 
     claude_default = (
         LLM_MODEL_DEFAULT
