@@ -251,7 +251,7 @@ def build_llm(model_name: str, temperature: float) -> ChatAnthropic:
         model=model_name,
         api_key=ANTHROPIC_API_KEY,   # 明确传入，避免 env/secret 读取异常
         temperature=temperature,
-        max_tokens=4096,             # 关键：显式传，避免 400
+        max_tokens=8192,             # 关键：显式传，避免 400
         timeout=120,                 # 可选：避免长请求超时
     )    
 
