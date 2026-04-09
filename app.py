@@ -48,6 +48,7 @@ def sget(key: str, default: Optional[str] = None) -> Optional[str]:
         pass
     return os.getenv(key, default)
 
+
 ANTHROPIC_API_KEY = sget("ANTHROPIC_API_KEY")
 LLM_MODEL_DEFAULT = sget("LLM_MODEL", "claude-opus-4-6")
 OPENAI_API_KEY = sget("OPENAI_API_KEY")
@@ -110,7 +111,7 @@ KB_DIR.mkdir(parents=True, exist_ok=True)
 DB_DIR.mkdir(parents=True, exist_ok=True)
 
 # =====================================================
-# ✅ 新版 4-Agent 定义（替代原 13-Agent）
+# 4-Agent 定义
 # =====================================================
 AGENTS = {
     "A｜账号定位师 · 战略罗盘": "agent_a.txt",
@@ -119,7 +120,6 @@ AGENTS = {
     "D｜影像导演 · 情绪建筑师": "agent_d.txt",
 }
 
-# Agent 描述（显示在侧边栏）
 AGENT_DESCRIPTIONS = {
     "A｜账号定位师 · 战略罗盘": "定位诊断 → 赛道验证 → 变现设计 → 人设锻造",
     "B｜选题架构师 · 爆款引擎": "灵感捕获 → 选题打磨 → 流量漏斗 → 架构选择",
@@ -233,31 +233,53 @@ def load_kb_documents(agent_id: str) -> List[Document]:
 
 def extract_text(resp) -> str:
     content = getattr(resp, "content", resp)
+
     if isinstance(content, str):
         return content
+
     if isinstance(content, list):
         out = []
         for block in content:
-            if isinstance(block, dict):
+            # Anthropic block object
+            if hasattr(block, "text"):
+                out.append(str(getattr(block, "text", "")))
+            elif isinstance(block, dict):
                 out.append(str(block.get("text", "")))
             else:
                 out.append(str(block))
         return "".join(out)
+
+    # 流式 chunk 常见情况
+    if hasattr(resp, "text"):
+        return str(getattr(resp, "text", ""))
+
     return str(content)
+
+
+def trim_chat_history(chat: List[Any], max_turns: int = 3) -> List[Any]:
+    if not chat:
+        return []
+    max_msgs = max_turns * 2
+    return chat[-max_msgs:]
 
 
 def build_llm(model_name: str, temperature: float) -> ChatAnthropic:
     return ChatAnthropic(
         model=model_name,
-        api_key=ANTHROPIC_API_KEY,   # 明确传入，避免 env/secret 读取异常
+        api_key=ANTHROPIC_API_KEY,
         temperature=temperature,
-        max_tokens=8192,             # 关键：显式传，避免 400
-        timeout=120,                 # 可选：避免长请求超时
-    )    
+        max_tokens=1800,
+        timeout=180,
+        max_retries=0,
+        streaming=True,
+    )
 
 
 def build_embeddings(model_name: str) -> OpenAIEmbeddings:
-    return OpenAIEmbeddings(model=model_name, api_key=OPENAI_API_KEY)
+    return OpenAIEmbeddings(
+        model=model_name,
+        api_key=OPENAI_API_KEY,
+    )
 
 
 @st.cache_resource(show_spinner=False)
@@ -284,29 +306,48 @@ def get_vectorstore(agent_id: str, embed_model: str):
     if existing == 0:
         raw_docs = load_kb_documents(agent_id)
         if raw_docs:
-            # ✅ 使用 Markdown 感知的分隔符，更好地切分结构化 KB
             splitter = RecursiveCharacterTextSplitter(
-                chunk_size=1200,
-                chunk_overlap=150,
+                chunk_size=900,
+                chunk_overlap=120,
                 separators=["\n## ", "\n### ", "\n#### ", "\n---", "\n\n", "\n", " "],
             )
             chunks = splitter.split_documents(raw_docs)
             vs.add_documents(chunks)
-            vs.persist()
 
     return vs
 
 
-def retrieve_context(agent_id: str, query: str, k: int, embed_model: str) -> str:
+def retrieve_context(
+    agent_id: str,
+    query: str,
+    k: int,
+    embed_model: str,
+    max_chars: int = 2500,
+) -> str:
     vs = get_vectorstore(agent_id, embed_model=embed_model)
     docs = vs.similarity_search(query, k=k)
     if not docs:
         return ""
 
     blocks = []
+    total = 0
+
     for i, d in enumerate(docs, 1):
         src = d.metadata.get("source", "kb")
-        blocks.append(f"[片段{i} | 来源: {src}]\n{d.page_content}")
+        text = d.page_content.strip()
+
+        # 单片段截断，避免单个 chunk 过长
+        text = text[:900]
+
+        block = f"[片段{i} | 来源: {src}]\n{text}"
+        block_len = len(block)
+
+        if total + block_len > max_chars:
+            break
+
+        blocks.append(block)
+        total += block_len
+
     return "\n\n".join(blocks)
 
 
@@ -326,7 +367,6 @@ with st.sidebar:
 
     st.divider()
 
-    # Agent 选择
     agent_name = st.selectbox("选择 Agent", list(AGENTS.keys()), key="agent_select")
 
     desc = AGENT_DESCRIPTIONS.get(agent_name, "")
@@ -335,12 +375,11 @@ with st.sidebar:
 
     st.divider()
 
-    # Claude 模型选择
     claude_candidates = [
-    "claude-opus-4-6",
-    "claude-sonnet-4-6",
-    "claude-haiku-4-5",  # alias
-]
+        "claude-opus-4-6",
+        "claude-sonnet-4-6",
+        "claude-haiku-4-5",
+    ]
 
     claude_default = (
         LLM_MODEL_DEFAULT
@@ -355,7 +394,6 @@ with st.sidebar:
         key="llm_select",
     )
 
-    # Embedding 选择
     embed_candidates = [
         "text-embedding-3-large",
         "text-embedding-3-small",
@@ -377,7 +415,7 @@ with st.sidebar:
     temperature = st.slider("temperature", 0.0, 1.0, 0.3, 0.05, key="temp_slider")
 
     use_rag = st.toggle("启用 RAG（从 KB 检索）", value=True, key="rag_toggle")
-    topk = st.slider("检索 TopK", 1, 8, 4, 1, key="topk_slider")
+    topk = st.slider("检索 TopK", 1, 8, 2, 1, key="topk_slider")
 
     if st.button("🗑️ 清空当前 Agent 对话", key="clear_chat_btn"):
         agent_file_tmp = AGENTS[agent_name]
@@ -393,12 +431,13 @@ with st.sidebar:
     st.divider()
     st.caption("🔄 创作流程：A定位 → B选题 → C文案 → D分镜")
 
+
 # =========================
 # 主流程
 # =========================
 agent_file = AGENTS[agent_name]
 system_prompt = load_prompt(agent_file)
-agent_id = agent_file.replace(".txt", "")  # agent_a / agent_b / agent_c / agent_d
+agent_id = agent_file.replace(".txt", "")
 
 llm = build_llm(model_name=model_name, temperature=temperature)
 
@@ -412,7 +451,6 @@ chat = st.session_state[chat_key]
 with st.expander("查看当前 Agent 的 System Prompt（只读）", expanded=False):
     st.code(system_prompt)
 
-# 展示历史对话
 for msg in chat:
     if isinstance(msg, HumanMessage):
         with st.chat_message("user"):
@@ -421,7 +459,6 @@ for msg in chat:
         with st.chat_message("assistant"):
             st.markdown(msg.content)
 
-# 用户输入
 user_text = st.chat_input(f"正在使用：{agent_name}（可粘贴长文本）")
 
 if user_text:
@@ -434,27 +471,54 @@ if user_text:
     rag_context = ""
     if use_rag:
         try:
-            rag_context = retrieve_context(agent_id, user_text, k=topk, embed_model=embed_model)
+            rag_context = retrieve_context(
+                agent_id=agent_id,
+                query=user_text,
+                k=topk,
+                embed_model=embed_model,
+                max_chars=2500,
+            )
         except Exception as e:
             st.error(f"RAG / Embedding 初始化失败：{e}")
             st.stop()
 
-    sys = system_prompt
+    recent_chat = trim_chat_history(chat, max_turns=3)
+
+    messages: List[Any] = [SystemMessage(content=system_prompt)]
+
     if rag_context:
-        sys = (
-            system_prompt
-            + "\n\n【可引用知识库片段】\n"
-            + rag_context
-            + "\n\n要求：如果引用了片段，请在回答中标注来源片段编号。"
+        messages.append(
+            HumanMessage(
+                content=(
+                    "以下是与当前问题相关的知识库片段，请优先基于这些内容回答。"
+                    "如果引用了片段，请在回答中标注来源片段编号。\n\n"
+                    f"{rag_context}"
+                )
+            )
         )
 
-    messages = [SystemMessage(content=sys)] + chat
+    messages.extend(recent_chat)
 
     with st.chat_message("assistant"):
         with st.spinner("思考中…"):
-            resp = llm.invoke(messages)
-            answer = extract_text(resp)
-            st.markdown(answer)
+            chunks: List[str] = []
+            placeholder = st.empty()
+
+            try:
+                for chunk in llm.stream(messages):
+                    piece = extract_text(chunk)
+                    if piece:
+                        chunks.append(piece)
+                        placeholder.markdown("".join(chunks))
+            except Exception as e:
+                st.error(f"Claude 调用超时/失败：{e}")
+                st.stop()
+
+            answer = "".join(chunks).strip()
+
+            if not answer:
+                answer = "模型未返回可解析内容，请重试。"
+                placeholder.markdown(answer)
 
     chat.append(AIMessage(content=answer))
     db_save_chat(user_id, agent_id, lc_to_json(chat))
@@ -468,3 +532,4 @@ with st.expander("🧪 调试面板", expanded=False):
     st.write("Embedding：", embed_model)
     st.write("RAG：", use_rag, "TopK=", topk)
     st.write("KB path：", str(KB_DIR / agent_id))
+    st.write("最近历史条数：", len(trim_chat_history(chat, max_turns=3)))
