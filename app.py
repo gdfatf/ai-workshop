@@ -240,7 +240,6 @@ def extract_text(resp) -> str:
     if isinstance(content, list):
         out = []
         for block in content:
-            # Anthropic block object
             if hasattr(block, "text"):
                 out.append(str(getattr(block, "text", "")))
             elif isinstance(block, dict):
@@ -249,28 +248,63 @@ def extract_text(resp) -> str:
                 out.append(str(block))
         return "".join(out)
 
-    # 流式 chunk 常见情况
     if hasattr(resp, "text"):
         return str(getattr(resp, "text", ""))
 
     return str(content)
 
 
-def trim_chat_history(chat: List[Any], max_turns: int = 3) -> List[Any]:
+def estimate_msg_len(msg: Any) -> int:
+    try:
+        return len(getattr(msg, "content", "") or "")
+    except Exception:
+        return 0
+
+
+def trim_chat_history_by_chars(
+    chat: List[Any],
+    max_chars: int = 18000,
+    min_keep_turns: int = 12,
+) -> List[Any]:
+    """
+    不按固定轮数硬裁剪，而是按字符预算保留更多上下文。
+    同时至少保留最近 min_keep_turns 轮（约 2*turns 条消息）。
+    """
     if not chat:
         return []
-    max_msgs = max_turns * 2
-    return chat[-max_msgs:]
+
+    min_keep_msgs = min(len(chat), min_keep_turns * 2)
+    guaranteed = chat[-min_keep_msgs:]
+
+    # 如果保底部分已经很长，也至少直接返回保底
+    total_guaranteed = sum(estimate_msg_len(m) for m in guaranteed)
+    if total_guaranteed >= max_chars:
+        return guaranteed
+
+    selected = guaranteed[:]
+    current_chars = total_guaranteed
+
+    older = chat[:-min_keep_msgs]
+    older_reversed = list(reversed(older))
+
+    for msg in older_reversed:
+        msg_len = estimate_msg_len(msg)
+        if current_chars + msg_len > max_chars:
+            break
+        selected.insert(0, msg)
+        current_chars += msg_len
+
+    return selected
 
 
-def build_llm(model_name: str, temperature: float) -> ChatAnthropic:
+def build_llm(model_name: str, temperature: float, long_mode: bool) -> ChatAnthropic:
     return ChatAnthropic(
         model=model_name,
         api_key=ANTHROPIC_API_KEY,
         temperature=temperature,
-        max_tokens=1800,
-        timeout=180,
-        max_retries=0,
+        max_tokens=5000 if long_mode else 3200,
+        timeout=300 if long_mode else 240,
+        max_retries=1,
         streaming=True,
     )
 
@@ -307,8 +341,8 @@ def get_vectorstore(agent_id: str, embed_model: str):
         raw_docs = load_kb_documents(agent_id)
         if raw_docs:
             splitter = RecursiveCharacterTextSplitter(
-                chunk_size=900,
-                chunk_overlap=120,
+                chunk_size=1200,
+                chunk_overlap=180,
                 separators=["\n## ", "\n### ", "\n#### ", "\n---", "\n\n", "\n", " "],
             )
             chunks = splitter.split_documents(raw_docs)
@@ -322,7 +356,8 @@ def retrieve_context(
     query: str,
     k: int,
     embed_model: str,
-    max_chars: int = 2500,
+    max_chars: int = 5000,
+    per_doc_max_chars: int = 1400,
 ) -> str:
     vs = get_vectorstore(agent_id, embed_model=embed_model)
     docs = vs.similarity_search(query, k=k)
@@ -335,9 +370,7 @@ def retrieve_context(
     for i, d in enumerate(docs, 1):
         src = d.metadata.get("source", "kb")
         text = d.page_content.strip()
-
-        # 单片段截断，避免单个 chunk 过长
-        text = text[:900]
+        text = text[:per_doc_max_chars]
 
         block = f"[片段{i} | 来源: {src}]\n{text}"
         block_len = len(block)
@@ -415,7 +448,9 @@ with st.sidebar:
     temperature = st.slider("temperature", 0.0, 1.0, 0.3, 0.05, key="temp_slider")
 
     use_rag = st.toggle("启用 RAG（从 KB 检索）", value=True, key="rag_toggle")
-    topk = st.slider("检索 TopK", 1, 8, 2, 1, key="topk_slider")
+    topk = st.slider("检索 TopK", 1, 8, 4, 1, key="topk_slider")
+
+    long_mode = st.toggle("长文/深度模式", value=True, key="long_mode")
 
     if st.button("🗑️ 清空当前 Agent 对话", key="clear_chat_btn"):
         agent_file_tmp = AGENTS[agent_name]
@@ -439,7 +474,7 @@ agent_file = AGENTS[agent_name]
 system_prompt = load_prompt(agent_file)
 agent_id = agent_file.replace(".txt", "")
 
-llm = build_llm(model_name=model_name, temperature=temperature)
+llm = build_llm(model_name=model_name, temperature=temperature, long_mode=long_mode)
 
 chat_key = f"chat::{user_id}::{agent_id}"
 if chat_key not in st.session_state:
@@ -476,13 +511,18 @@ if user_text:
                 query=user_text,
                 k=topk,
                 embed_model=embed_model,
-                max_chars=2500,
+                max_chars=7000 if long_mode else 5000,
+                per_doc_max_chars=1800 if long_mode else 1400,
             )
         except Exception as e:
             st.error(f"RAG / Embedding 初始化失败：{e}")
             st.stop()
 
-    recent_chat = trim_chat_history(chat, max_turns=3)
+    recent_chat = trim_chat_history_by_chars(
+        chat=chat,
+        max_chars=26000 if long_mode else 18000,
+        min_keep_turns=16 if long_mode else 12,
+    )
 
     messages: List[Any] = [SystemMessage(content=system_prompt)]
 
@@ -491,7 +531,8 @@ if user_text:
             HumanMessage(
                 content=(
                     "以下是与当前问题相关的知识库片段，请优先基于这些内容回答。"
-                    "如果引用了片段，请在回答中标注来源片段编号。\n\n"
+                    "如果引用了片段，请在回答中标注来源片段编号。"
+                    "当知识库片段与历史对话冲突时，以当前问题和更直接相关的片段为准。\n\n"
                     f"{rag_context}"
                 )
             )
@@ -531,5 +572,10 @@ with st.expander("🧪 调试面板", expanded=False):
     st.write("LLM：", model_name)
     st.write("Embedding：", embed_model)
     st.write("RAG：", use_rag, "TopK=", topk)
+    st.write("Long mode：", long_mode)
     st.write("KB path：", str(KB_DIR / agent_id))
-    st.write("最近历史条数：", len(trim_chat_history(chat, max_turns=3)))
+    st.write("当前总历史条数：", len(chat))
+    st.write(
+        "实际发送历史条数：",
+        len(trim_chat_history_by_chars(chat, max_chars=26000 if long_mode else 18000, min_keep_turns=16 if long_mode else 12)),
+    )
