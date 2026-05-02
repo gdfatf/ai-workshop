@@ -298,16 +298,19 @@ def trim_chat_history_by_chars(
 
 
 def build_llm(model_name: str, temperature: float, long_mode: bool) -> ChatAnthropic:
-    return ChatAnthropic(
-        model=model_name,
-        api_key=ANTHROPIC_API_KEY,
-        temperature=temperature,
-        max_tokens=8000 if long_mode else 4800,
-        timeout=500 if long_mode else 340,
-        max_retries=1,
-        streaming=True,
-    )
+    llm_kwargs = {
+        "model": model_name,
+        "api_key": ANTHROPIC_API_KEY,
+        "max_tokens": 5000 if long_mode else 3200,
+        "timeout": 300 if long_mode else 240,
+        "max_retries": 1,
+        "streaming": True,
+    }
 
+    if "4-7" not in model_name:
+        llm_kwargs["temperature"] = temperature
+
+    return ChatAnthropic(**llm_kwargs)
 
 def build_embeddings(model_name: str) -> OpenAIEmbeddings:
     return OpenAIEmbeddings(
