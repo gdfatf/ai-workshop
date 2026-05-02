@@ -50,7 +50,7 @@ def sget(key: str, default: Optional[str] = None) -> Optional[str]:
 
 
 ANTHROPIC_API_KEY = sget("ANTHROPIC_API_KEY")
-LLM_MODEL_DEFAULT = sget("LLM_MODEL", "claude-opus-4-6")
+LLM_MODEL_DEFAULT = sget("LLM_MODEL", "claude-opus-4-7")
 OPENAI_API_KEY = sget("OPENAI_API_KEY")
 APP_PASSWORD = sget("APP_PASSWORD", "")
 
@@ -410,7 +410,7 @@ with st.sidebar:
 
     claude_candidates = [
         "claude-opus-4-7",
-        "claude-sonnet-4-7"
+        "claude-sonnet-4-7",
         "claude-opus-4-6",
         "claude-sonnet-4-6",
         "claude-haiku-4-5",
