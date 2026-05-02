@@ -302,8 +302,8 @@ def build_llm(model_name: str, temperature: float, long_mode: bool) -> ChatAnthr
         model=model_name,
         api_key=ANTHROPIC_API_KEY,
         temperature=temperature,
-        max_tokens=5000 if long_mode else 3200,
-        timeout=300 if long_mode else 240,
+        max_tokens=8000 if long_mode else 4800,
+        timeout=500 if long_mode else 340,
         max_retries=1,
         streaming=True,
     )
@@ -356,8 +356,8 @@ def retrieve_context(
     query: str,
     k: int,
     embed_model: str,
-    max_chars: int = 5000,
-    per_doc_max_chars: int = 1400,
+    max_chars: int = 10000,
+    per_doc_max_chars: int = 1800,
 ) -> str:
     vs = get_vectorstore(agent_id, embed_model=embed_model)
     docs = vs.similarity_search(query, k=k)
@@ -409,6 +409,8 @@ with st.sidebar:
     st.divider()
 
     claude_candidates = [
+        "claude-opus-4-7",
+        "claude-sonnet-4-7"
         "claude-opus-4-6",
         "claude-sonnet-4-6",
         "claude-haiku-4-5",
