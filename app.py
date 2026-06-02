@@ -50,7 +50,7 @@ def sget(key: str, default: Optional[str] = None) -> Optional[str]:
 
 
 ANTHROPIC_API_KEY = sget("ANTHROPIC_API_KEY")
-LLM_MODEL_DEFAULT = sget("LLM_MODEL", "claude-opus-4-6")
+LLM_MODEL_DEFAULT = sget("LLM_MODEL", "claude-opus-4-8")
 OPENAI_API_KEY = sget("OPENAI_API_KEY")
 APP_PASSWORD = sget("APP_PASSWORD", "")
 
@@ -306,6 +306,7 @@ def build_llm(model_name: str, temperature: float, long_mode: bool) -> ChatAnthr
         timeout=300 if long_mode else 240,
         max_retries=1,
         streaming=True,
+        model_kwargs={"effort": "high"},
     )
 
 
@@ -409,7 +410,7 @@ with st.sidebar:
     st.divider()
 
     claude_candidates = [
-        "claude-opus-4-6",
+        "claude-opus-4-8",
         "claude-sonnet-4-6",
         "claude-haiku-4-5",
     ]
