@@ -298,15 +298,18 @@ def trim_chat_history_by_chars(
 
 
 def build_llm(model_name: str, temperature: float, long_mode: bool) -> ChatAnthropic:
-    return ChatAnthropic(
+    kwargs = dict(
         model=model_name,
         api_key=ANTHROPIC_API_KEY,
-        temperature=temperature,
         max_tokens=5000 if long_mode else 3200,
         timeout=300 if long_mode else 240,
         max_retries=1,
         streaming=True,
     )
+    # Opus 4.x 等新模型不再支持 temperature 参数，仅对旧模型传入
+    if not model_name.startswith("claude-opus-4"):
+        kwargs["temperature"] = temperature
+    return ChatAnthropic(**kwargs)
 
 
 def build_embeddings(model_name: str) -> OpenAIEmbeddings:
