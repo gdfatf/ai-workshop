@@ -306,7 +306,6 @@ def build_llm(model_name: str, temperature: float, long_mode: bool) -> ChatAnthr
         timeout=300 if long_mode else 240,
         max_retries=1,
         streaming=True,
-        model_kwargs={"effort": "high"},
     )
 
 
